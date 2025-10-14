@@ -61,8 +61,8 @@ namespace HSR_DataDownloader
             File.WriteAllLines(exResourceLinksFilePath, hotfixParser.exResourceLinks.Distinct());
             Console.WriteLine($"DesignData links written to {exResourceLinksFilePath}");
 
-            await downloader_asb.DownloadFilesAsync(hotfixParser.asbLinks.Distinct().ToArray());
-            await downloader_lua.DownloadFilesAsync(hotfixParser.luaLinks.Distinct().ToArray());
+            // await downloader_asb.DownloadFilesAsync(hotfixParser.asbLinks.Distinct().ToArray());
+            // await downloader_lua.DownloadFilesAsync(hotfixParser.luaLinks.Distinct().ToArray());
             await downloader_designData.DownloadFilesAsync(hotfixParser.exResourceLinks.Distinct().ToArray());
         }
     }
