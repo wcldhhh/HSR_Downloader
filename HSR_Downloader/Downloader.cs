@@ -22,7 +22,7 @@ public class Downloader
 
 	public async Task DownloadFilesAsync(string[] urls)
 	{
-		var semaphore = new SemaphoreSlim(3); // only 3 downloads at once
+		var semaphore = new SemaphoreSlim(10); // limit the downloads to 10 downloads at once
 		var tasks = new List<Task>();
 
 		foreach (var url in urls)
