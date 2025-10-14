@@ -45,6 +45,12 @@ public class Downloader
 			var fileName = GetFileNameFromUrl(url);
 			var filePath = Path.Combine(destinationPath, fileName);
 
+			if (File.Exists(filePath))
+			{
+				logger.LogSuccess($"Skipping {fileName} as it exists in the path...", false);
+				return;
+			}
+
 			using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
 			response.EnsureSuccessStatusCode();
 
