@@ -1,6 +1,8 @@
 # HSR_Downloader
  Asb/DesignData/Lua hotfix downloader for some anime game with stars and rails
 
+[English](README.md) | [中文](README.zh-CN.md)
+
 > **Updated to support the latest DesignData and Lua data formats**
 
 # Usage

@@ -1,6 +1,8 @@
 # HSR_Downloader
 某回合制二游的 Asb/DesignData/Lua 热更新资源下载器
 
+[English](README.md) | [中文](README.zh-CN.md)
+
 > **已适配最新 DesignData 和 Lua 数据格式**
 
 # 使用方法
