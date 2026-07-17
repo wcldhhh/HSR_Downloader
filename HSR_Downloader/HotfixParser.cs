@@ -14,10 +14,23 @@ public class HotfixParser
     private LuaIndex _luaIndex;
     private DesignIndex _designIndex;
 
-    public List<string> asbLinks = new();
-    public List<string> luaLinks = new();
-    public List<string> exResourceLinks = new();
+    /// <summary>Desired languages for filtering (e.g. "cn","en","jp"). Empty = download all.</summary>
+    public List<string> Languages { get; set; } = new();
 
+    /// <summary>Download items with URL and subdirectory info.</summary>
+    public List<DownloadItem> asbItems = new();
+    public List<DownloadItem> luaItems = new();
+    public List<DownloadItem> designItems = new();
+
+    /// <summary>Backward-compatible URL lists.</summary>
+    public List<string> asbLinks => asbItems.Select(i => i.Url).ToList();
+    public List<string> luaLinks => luaItems.Select(i => i.Url).ToList();
+    public List<string> exResourceLinks => designItems.Select(i => i.Url).ToList();
+
+    /// <summary>Get the parsed DesignIndex (available after ParseDesignDatasAsync).</summary>
+    public DesignIndex? GetDesignIndex() => _designIndex;
+    /// <summary>Get the parsed LuaIndex (available after ParseLuaDatasAsync).</summary>
+    public LuaIndex? GetLuaIndex() => _luaIndex;
 
     public HotfixParser(HttpClient client, Logger logger, HotfixJson hotfixJson, string platform, BlockV blockV, DesignIndex designIndex, LuaIndex luaIndex)
     {
@@ -30,6 +43,18 @@ public class HotfixParser
         _designIndex = designIndex ?? throw new ArgumentNullException(nameof(designIndex));
     }
 
+    private bool ShouldDownloadFile(string? lang)
+    {
+        // Always download shared files (no language tag)
+        if (string.IsNullOrEmpty(lang))
+            return true;
+        // If no filter specified, download all
+        if (Languages.Count == 0)
+            return true;
+        // Download if language matches filter
+        return Languages.Contains(lang.ToLowerInvariant());
+    }
+
     public async Task ParseAsbDatasAsync()
     {
         if (string.IsNullOrEmpty(_hotfixJson.assetBundleUrl)) return;
@@ -38,38 +63,32 @@ public class HotfixParser
             string? baseAssetDownloadURL = null;
             string url = $"{_hotfixJson.assetBundleUrl}/client/{_platform}/Archive/M_ArchiveV.bytes";
             string response = await _client.GetStringAsync(url).ConfigureAwait(false);
-            asbLinks.Add(url);
+            asbItems.Add(new DownloadItem(url, "Asb"));
 
             _logger.LogInfo("Successfully fetched M_ArchiveV data from the URL");
 
             foreach (string rsp in response.Split('\n'))
             {
-                if (string.IsNullOrWhiteSpace(rsp))
-                {
-                    continue;
-                }
+                if (string.IsNullOrWhiteSpace(rsp)) continue;
 
                 M_ArchiveV? item = JsonConvert.DeserializeObject<M_ArchiveV>(rsp);
-                if (item == null || !item.FileName.StartsWith("M_BlockV"))
-                {
-                    continue;
-                }
+                if (item == null || !item.FileName.StartsWith("M_BlockV")) continue;
 
                 if (!string.IsNullOrEmpty(item.BaseAssetsDownloadUrl))
-                {
                     baseAssetDownloadURL = item.BaseAssetsDownloadUrl;
-                }
 
                 string blockVurl = $"{_hotfixJson.assetBundleUrl}/client/{_platform}/Block/BlockV_{item.ContentHash}.bytes";
                 byte[] blockVcontent = await _client.GetByteArrayAsync(blockVurl).ConfigureAwait(false);
                 _blockV.ReadData(blockVcontent);
-                asbLinks.Add(blockVurl);
+                asbItems.Add(new DownloadItem(blockVurl, "Asb"));
 
                 foreach (var block in _blockV.asbBlocks)
                 {
                     if (block.isStart || string.IsNullOrEmpty(baseAssetDownloadURL))
                     {
-                        asbLinks.Add($"{_hotfixJson.assetBundleUrl}/client/{_platform}/Block/{block.assetName}.block");
+                        asbItems.Add(new DownloadItem(
+                            $"{_hotfixJson.assetBundleUrl}/client/{_platform}/Block/{block.assetName}.block",
+                            "Asb"));
                     }
                     else
                     {
@@ -77,7 +96,9 @@ public class HotfixParser
                         string[] urlParts = _hotfixJson.assetBundleUrl.Split('/');
                         urlParts[^1] = baseAssetDownloadURL;
                         string newurl = string.Join("/", urlParts);
-                        asbLinks.Add($"{newurl}/client/{_platform}/Block/{block.assetName}.block");
+                        asbItems.Add(new DownloadItem(
+                            $"{newurl}/client/{_platform}/Block/{block.assetName}.block",
+                            "Asb"));
                     }
                 }
             }
@@ -92,7 +113,6 @@ public class HotfixParser
         }
     }
 
-
     public async Task ParseDesignDatasAsync()
     {
         if (string.IsNullOrEmpty(_hotfixJson.exResourceUrl)) return;
@@ -100,7 +120,7 @@ public class HotfixParser
         {
             string url = $"{_hotfixJson.exResourceUrl}/client/{_platform}/M_DesignV.bytes";
             byte[] designBytes = await _client.GetByteArrayAsync(url).ConfigureAwait(false);
-            exResourceLinks.Add(url);
+            designItems.Add(new DownloadItem(url, "DesignData"));
 
             _logger.LogInfo("Successfully fetched M_DesignV data from the URL");
 
@@ -113,7 +133,6 @@ public class HotfixParser
             ms.Seek(0xE, SeekOrigin.Current);
 
             var RemoteRevisionID = br.ReadInt32();
-
             var IndexHash = br.ReadHash();
 
             var AssetListFilesize = br.ReadUInt32();
@@ -124,13 +143,28 @@ public class HotfixParser
             string indexHashUrl = $"{_hotfixJson.exResourceUrl}/client/{_platform}/DesignV_{IndexHash}.bytes";
             byte[] indexBytes = await _client.GetByteArrayAsync(indexHashUrl).ConfigureAwait(false);
             _designIndex = DesignIndex.Read(indexBytes);
+            designItems.Add(new DownloadItem(indexHashUrl, "DesignData"));
+
             var entriesNum = _designIndex.Files.Sum(file => file.Entries.Count);
             var filesNum = _designIndex.Files.Count;
-            exResourceLinks.Add(indexHashUrl);
+            var availableLangs = _designIndex.Files.Where(f => !string.IsNullOrEmpty(f.Lang)).Select(f => f.Lang).Distinct().OrderBy(l => l).ToList();
+            _logger.LogInfo($"DesignV v{_designIndex.Version}: {filesNum} files, {entriesNum} entries, languages: [{string.Join(", ", availableLangs)}]", true);
 
             foreach (var file in _designIndex.Files)
             {
-                exResourceLinks.Add($"{_hotfixJson.exResourceUrl}/client/{_platform}/{file.FileHash}.bytes");
+                if (!ShouldDownloadFile(file.Lang))
+                {
+                    _logger.LogInfo($"  Skipping {file.FileHash}.bytes (lang={file.Lang})");
+                    continue;
+                }
+
+                // Put language-specific files in language subdirectory (both URL and local path)
+                var langPath = string.IsNullOrEmpty(file.Lang) ? "" : $"/{file.Lang}";
+                var subDir = string.IsNullOrEmpty(file.Lang) ? "DesignData" : $"DesignData/{file.Lang}";
+                designItems.Add(new DownloadItem(
+                    $"{_hotfixJson.exResourceUrl}/client/{_platform}{langPath}/{file.FileHash}.bytes",
+                    subDir,
+                    $"{file.FileHash}.bytes"));
             }
         }
         catch (HttpRequestException e)
@@ -141,7 +175,6 @@ public class HotfixParser
         {
             _logger.LogError($"Unexpected error: {e.Message}");
         }
-
     }
 
     public async Task ParseLuaDatasAsync()
@@ -151,7 +184,7 @@ public class HotfixParser
         {
             string url = $"{_hotfixJson.luaUrl}/client/{_platform}/M_LuaV.bytes";
             byte[] luaVBytes = await _client.GetByteArrayAsync(url).ConfigureAwait(false);
-            luaLinks.Add(url);
+            luaItems.Add(new DownloadItem(url, "Lua"));
 
             _logger.LogInfo("Successfully fetched M_LuaV data from the URL");
 
@@ -164,7 +197,6 @@ public class HotfixParser
             ms.Seek(0xE, SeekOrigin.Current);
 
             var RemoteRevisionID = br.ReadInt32();
-
             var IndexHash = br.ReadHash();
 
             var AssetListFilesize = br.ReadUInt32();
@@ -175,13 +207,27 @@ public class HotfixParser
             string indexHashUrl = $"{_hotfixJson.luaUrl}/client/{_platform}/LuaV_{IndexHash}.bytes";
             byte[] indexBytes = await _client.GetByteArrayAsync(indexHashUrl).ConfigureAwait(false);
             _luaIndex = LuaIndex.Read(indexBytes);
+            luaItems.Add(new DownloadItem(indexHashUrl, "Lua"));
+
             var entriesNum = _luaIndex.Files.Sum(file => file.Entries.Count);
             var filesNum = _luaIndex.Files.Count;
-            luaLinks.Add(indexHashUrl);
+            var availableLangs = _luaIndex.Files.Where(f => !string.IsNullOrEmpty(f.Lang)).Select(f => f.Lang).Distinct().OrderBy(l => l).ToList();
+            _logger.LogInfo($"LuaV v{_luaIndex.Version}: {filesNum} files, {entriesNum} entries, languages: [{string.Join(", ", availableLangs)}]", true);
 
             foreach (var file in _luaIndex.Files)
             {
-                luaLinks.Add($"{_hotfixJson.luaUrl}/client/{_platform}/{file.FileHash}.bytes");
+                if (!ShouldDownloadFile(file.Lang))
+                {
+                    _logger.LogInfo($"  Skipping {file.FileHash}.bytes (lang={file.Lang})");
+                    continue;
+                }
+
+                var langPath = string.IsNullOrEmpty(file.Lang) ? "" : $"/{file.Lang}";
+                var subDir = string.IsNullOrEmpty(file.Lang) ? "Lua" : $"Lua/{file.Lang}";
+                luaItems.Add(new DownloadItem(
+                    $"{_hotfixJson.luaUrl}/client/{_platform}{langPath}/{file.FileHash}.bytes",
+                    subDir,
+                    $"{file.FileHash}.bytes"));
             }
         }
         catch (HttpRequestException e)
@@ -192,6 +238,22 @@ public class HotfixParser
         {
             _logger.LogError($"Unexpected error: {e.Message}");
         }
+    }
+}
 
+/// <summary>
+/// Represents a downloadable item with URL, destination subdirectory, and filename.
+/// </summary>
+public class DownloadItem
+{
+    public string Url { get; }
+    public string SubDirectory { get; }
+    public string FileName { get; }
+
+    public DownloadItem(string url, string subDirectory, string? fileName = null)
+    {
+        Url = url;
+        SubDirectory = subDirectory;
+        FileName = fileName ?? new Uri(url).Segments.Last();
     }
 }

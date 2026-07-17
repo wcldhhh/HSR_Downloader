@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 
@@ -7,67 +8,122 @@ namespace HSR_DataDownloader;
 
 public class Downloader
 {
-	private static readonly HttpClient client = new HttpClient()
-	{
-		Timeout = Timeout.InfiniteTimeSpan
-	};
-	private readonly Logger logger;
-	private readonly string destinationPath;
+    private static readonly HttpClient client = new HttpClient()
+    {
+        Timeout = TimeSpan.FromMinutes(5)
+    };
+    private readonly Logger logger;
+    private readonly string destinationPath;
+    private const int MaxRetries = 3;
 
-	public Downloader(Logger logger, string destinationPath)
-	{
-		this.logger = logger;
-		this.destinationPath = destinationPath;
-	}
+    public Downloader(Logger logger, string destinationPath)
+    {
+        this.logger = logger;
+        this.destinationPath = destinationPath;
+    }
 
-	public async Task DownloadFilesAsync(string[] urls)
-	{
-		var semaphore = new SemaphoreSlim(10); // limit the downloads to 10 downloads at once
-		var tasks = new List<Task>();
+    public async Task DownloadFilesAsync(string[] urls)
+    {
+        var items = urls.Select(u => new DownloadItem(u, destinationPath)).ToArray();
+        await DownloadItemsAsync(items);
+    }
 
-		foreach (var url in urls)
-		{
-			await semaphore.WaitAsync();
-			tasks.Add(Task.Run(async () =>
-			{
-				try { await DownloadFileAsync(url); }
-				finally { semaphore.Release(); }
-			}));
-		}
+    public async Task DownloadItemsAsync(DownloadItem[] items)
+    {
+        var semaphore = new SemaphoreSlim(5); // limit concurrent downloads
+        var tasks = new List<Task>();
 
-		await Task.WhenAll(tasks);
-	}
+        foreach (var item in items)
+        {
+            await semaphore.WaitAsync();
+            tasks.Add(Task.Run(async () =>
+            {
+                try { await DownloadWithRetryAsync(item); }
+                finally { semaphore.Release(); }
+            }));
+        }
 
-	private async Task DownloadFileAsync(string url)
-	{
-		try
-		{
-			var fileName = GetFileNameFromUrl(url);
-			var filePath = Path.Combine(destinationPath, fileName);
+        await Task.WhenAll(tasks);
+    }
 
-			if (File.Exists(filePath))
-			{
-				logger.LogSuccess($"Skipping {fileName} as it exists in the path...", false);
-				return;
-			}
+    private async Task DownloadWithRetryAsync(DownloadItem item)
+    {
+        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                await DownloadItemAsync(item);
+                return; // success
+            }
+            catch (Exception ex)
+            {
+                if (attempt < MaxRetries)
+                {
+                    logger.LogWarning($"Attempt {attempt}/{MaxRetries} failed for {item.FileName}: {ex.Message}. Retrying...");
+                    await Task.Delay(TimeSpan.FromSeconds(attempt * 2));
+                }
+                else
+                {
+                    logger.LogError($"Failed to download {item.FileName} after {MaxRetries} attempts: {ex.Message}");
+                }
+            }
+        }
+    }
 
-			using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-			response.EnsureSuccessStatusCode();
+    private async Task DownloadItemAsync(DownloadItem item)
+    {
+        var dir = item.SubDirectory;
+        if (!Path.IsPathRooted(dir))
+            dir = Path.Combine(Directory.GetCurrentDirectory(), dir);
 
-			await using var stream = await response.Content.ReadAsStreamAsync();
-			await using var fileStream = File.Create(filePath);
-			await stream.CopyToAsync(fileStream);
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
 
-			logger.LogSuccess($"Downloaded {fileName}", false);
-		}
-		catch (Exception ex)
-		{
-			logger.LogWarning($"Error downloading {url}: {ex.Message}");
-		}
-	}
+        var filePath = Path.Combine(dir, item.FileName);
 
-	private string GetFileNameFromUrl(string url)
-	{
-		return new Uri(url).Segments.Last();
-	}
+        // Check if file exists and has content
+        if (File.Exists(filePath))
+        {
+            var existingInfo = new FileInfo(filePath);
+            if (existingInfo.Length > 0)
+            {
+                logger.LogSuccess($"Skipping {item.FileName} (exists, {existingInfo.Length / 1024.0:F1} KB)", false);
+                return;
+            }
+            // Delete empty/corrupt file
+            File.Delete(filePath);
+        }
+
+        using var response = await client.GetAsync(item.Url, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+
+        var expectedSize = response.Content.Headers.ContentLength;
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        await using var fileStream = File.Create(filePath);
+        await stream.CopyToAsync(fileStream);
+        await fileStream.FlushAsync();
+        fileStream.Close();
+
+        // Verify file size
+        var downloadedInfo = new FileInfo(filePath);
+        if (expectedSize.HasValue && downloadedInfo.Length != expectedSize.Value)
+        {
+            File.Delete(filePath);
+            throw new Exception($"Size mismatch: expected {expectedSize.Value} bytes, got {downloadedInfo.Length} bytes");
+        }
+
+        if (downloadedInfo.Length == 0)
+        {
+            File.Delete(filePath);
+            throw new Exception("Downloaded file is empty");
+        }
+
+        logger.LogSuccess($"Downloaded {item.FileName} ({downloadedInfo.Length / 1024.0:F1} KB)", false);
+    }
+
+    private string GetFileNameFromUrl(string url)
+    {
+        return new Uri(url).Segments.Last();
+    }
 }

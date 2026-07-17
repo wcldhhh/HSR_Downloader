@@ -16,6 +16,8 @@ public class EndianBinaryReader : BinaryReader
     {
     }
 
+    public ushort ReadUInt16BE() => (ushort)SwapBytes16(base.ReadUInt16());
+
     public uint ReadUInt32BE() => SwapBytes(base.ReadUInt32());
 
     public ulong ReadUInt64BE() => SwapBytes(base.ReadUInt64());
@@ -96,6 +98,11 @@ public class EndianBinaryReader : BinaryReader
     {
         var fullHash = base.ReadBytes(16);
         return Convert.ToHexString(fullHash).ToLower();
+    }
+
+    private ushort SwapBytes16(ushort x)
+    {
+        return (ushort)((x >> 8) | (x << 8));
     }
 
     private uint SwapBytes(uint x)
