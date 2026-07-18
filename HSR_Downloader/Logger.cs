@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using Colorful;
 
@@ -29,7 +29,7 @@ namespace HSR_DataDownloader
                 LogMessage(message, LogColors.INFO);
         }
 
-        public void LogSuccess(string message, bool isImportant)
+        public void LogSuccess(string message, bool isImportant = false)
         {
             if (DoLogUselessInfo || isImportant)
                 LogMessage(message, LogColors.SUCCESS);

@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 
 namespace HSR_DataDownloader;
 
@@ -21,6 +21,8 @@ public class EndianBinaryReader : BinaryReader
     public uint ReadUInt32BE() => SwapBytes(base.ReadUInt32());
 
     public ulong ReadUInt64BE() => SwapBytes(base.ReadUInt64());
+
+    public short ReadInt16BE() => (short)SwapBytes16(base.ReadUInt16());
 
     public int ReadInt32BE() => (int)SwapBytes(base.ReadUInt32());
 
@@ -74,6 +76,10 @@ public class EndianBinaryReader : BinaryReader
         return (long)(value >> 1);
     }
 
+    /// <summary>
+    /// Read 16 bytes as a hash: reads 4 x uint32 LE, reverses each chunk's bytes, returns lowercase hex.
+    /// Used for M_DesignV/M_LuaV IndexHash parsing.
+    /// </summary>
     public string ReadHash()
     {
         var fullHash = new byte[16];
@@ -94,15 +100,19 @@ public class EndianBinaryReader : BinaryReader
         return Convert.ToHexString(fullHash).ToLower();
     }
 
+    /// <summary>
+    /// Read 16 bytes directly as a hash (no byte reversal). Returns lowercase hex.
+    /// Used for DesignIndex/LuaIndex FileHash parsing.
+    /// </summary>
     public string ReadStraightHash()
     {
         var fullHash = base.ReadBytes(16);
         return Convert.ToHexString(fullHash).ToLower();
     }
 
-    private ushort SwapBytes16(ushort x)
+    private uint SwapBytes16(uint x)
     {
-        return (ushort)((x >> 8) | (x << 8));
+        return ((x & 0xFF00) >> 8) | ((x & 0x00FF) << 8);
     }
 
     private uint SwapBytes(uint x)

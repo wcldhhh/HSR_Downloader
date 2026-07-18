@@ -1,15 +1,27 @@
-﻿using HSR_DataDownloader;
+using HSR_DataDownloader;
 using System.Text;
 
 namespace HSR_DataDownloader;
 
+/// <summary>
+/// Unified DesignIndex that supports both Beta (v3/v4 with 0xFF magic) and Rel (legacy) formats.
+/// </summary>
 public class DesignIndex
 {
+    // Beta fields
     public uint Magic;
     public uint Version;
+
+    // Rel fields
+    public long Unk1;
+
+    // Common fields
     public int FileCount;
     public int DesignDataCount;
     public List<FileEntry> Files = new();
+
+    /// <summary>Which format was detected during reading.</summary>
+    public ServerMode DetectedMode { get; private set; }
 
     public class FileEntry
     {
@@ -27,25 +39,36 @@ public class DesignIndex
             public ulong NameHash;
             public uint Size;
             public uint Offset;
-            public static DataEntry Read(EndianBinaryReader br, uint version)
+
+            public static DataEntry Read(EndianBinaryReader br, ServerMode mode, uint version)
             {
                 var entry = new DataEntry();
-                entry.NameHash = version >= 4 ? br.ReadUInt64BE() : (ulong)br.ReadUInt32BE();
+                if (mode == ServerMode.Beta && version >= 4)
+                    entry.NameHash = br.ReadUInt64BE();
+                else
+                    entry.NameHash = (ulong)br.ReadUInt32BE();
                 entry.Size = br.ReadUInt32BE();
                 entry.Offset = br.ReadUInt32BE();
                 return entry;
             }
         }
 
-        public static FileEntry Read(EndianBinaryReader br, uint version)
+        public static FileEntry Read(EndianBinaryReader br, ServerMode mode, uint version)
         {
             var entry = new FileEntry();
-            entry.NameHash = version >= 4 ? br.ReadUInt64BE() : (ulong)br.ReadUInt32BE();
+
+            if (mode == ServerMode.Beta && version >= 4)
+                entry.NameHash = br.ReadUInt64BE();
+            else
+                entry.NameHash = (ulong)br.ReadUInt32BE();
+
             entry.FileHash = br.ReadStraightHash();
             entry.ReadSize = br.ReadUInt64BE();
             var cnt = br.ReadUInt32BE();
+
             for (var i = 0; i < cnt; i++)
-                entry.Entries.Add(DataEntry.Read(br, version));
+                entry.Entries.Add(DataEntry.Read(br, mode, version));
+
             var offset = 0u;
             foreach (var ientry in entry.Entries)
             {
@@ -53,7 +76,9 @@ public class DesignIndex
                     throw new Exception($"Offset mismatch in filehash {entry.FileHash}");
                 offset += ientry.Size;
             }
-            if (version >= 4)
+
+            // Language tag: Beta v4+ and Rel both have length-prefixed lang string
+            if (mode == ServerMode.Beta && version >= 4)
             {
                 var langLen = br.ReadUInt16BE();
                 if (langLen > 0)
@@ -62,7 +87,19 @@ public class DesignIndex
                     entry.Lang = Encoding.UTF8.GetString(langBytes);
                 }
             }
+            else if (mode == ServerMode.Rel)
+            {
+                var langLen = br.ReadUInt16BE();
+                if (langLen > 0)
+                {
+                    var langBuf = br.ReadBytes(langLen);
+                    entry.Lang = Encoding.UTF8.GetString(langBuf);
+                }
+            }
+            // Beta v3: no language tag
+
             entry.Unk = br.ReadByte();
+
             if (entry.ReadSize != entry.Size)
                 throw new Exception($"Size mismatch in filehash {entry.FileHash}: read {entry.ReadSize}, calc {entry.Size}");
             return entry;
@@ -74,7 +111,7 @@ public class DesignIndex
     /// </summary>
     public (FileEntry.DataEntry dataEntry, FileEntry fileEntry) FindAllowedLanguage()
     {
-        ulong target = Version >= 4 ? 0xB804DBC76D81FB75UL : 0xE148B2BEUL;
+        ulong target = (DetectedMode == ServerMode.Beta && Version >= 4) ? 0xB804DBC76D81FB75UL : 0xE148B2BEUL;
         return FindDataEntry(target);
     }
 
@@ -110,7 +147,7 @@ public class DesignIndex
     }
 
     /// <summary>
-    /// Get all unique NameHashes in the index (useful for finding specific tables)
+    /// Get all unique NameHashes in the index
     /// </summary>
     public Dictionary<ulong, int> GetNameHashSet()
     {
@@ -137,16 +174,50 @@ public class DesignIndex
     public static DesignIndex Read(EndianBinaryReader br)
     {
         var index = new DesignIndex();
-        index.Magic = br.ReadUInt32BE();
-        index.Version = br.ReadUInt32BE();
-        index.FileCount = br.ReadInt32BE();
-        index.DesignDataCount = br.ReadInt32BE();
-        if (index.Magic != 0xFF)
-            throw new Exception($"Invalid DesignV magic: 0x{index.Magic:X}");
-        if (index.Version != 3 && index.Version != 4)
-            throw new Exception($"Unsupported DesignV version: {index.Version}");
+
+        // Save position to detect format
+        var startPos = br.BaseStream.Position;
+
+        // Try reading as Beta format (starts with Magic + Version)
+        var firstUint = br.ReadUInt32BE();
+        var secondUint = br.ReadUInt32BE();
+
+        if (firstUint == 0xFF && (secondUint == 3 || secondUint == 4))
+        {
+            // Beta format: Magic(0xFF) + Version(3 or 4)
+            index.DetectedMode = ServerMode.Beta;
+            index.Magic = firstUint;
+            index.Version = secondUint;
+            index.FileCount = br.ReadInt32BE();
+            index.DesignDataCount = br.ReadInt32BE();
+        }
+        else
+        {
+            // Rel format: Unk1(8 bytes) + FileCount(4 BE) + DesignDataCount(4 BE)
+            // We already read 8 bytes (firstUint + secondUint), which is Unk1
+            br.BaseStream.Position = startPos;
+            index.DetectedMode = ServerMode.Rel;
+            index.Unk1 = br.ReadInt64();
+            index.FileCount = br.ReadInt32BE();
+            index.DesignDataCount = br.ReadInt32BE();
+        }
+
         for (var i = 0; i < index.FileCount; i++)
-            index.Files.Add(FileEntry.Read(br, index.Version));
+            index.Files.Add(FileEntry.Read(br, index.DetectedMode, index.Version));
+
         return index;
+    }
+
+    public void RecalcSizeOffsets()
+    {
+        foreach (var file in Files)
+        {
+            var offset = 0u;
+            foreach (var entry in file.Entries)
+            {
+                entry.Offset = offset;
+                offset += entry.Size;
+            }
+        }
     }
 }

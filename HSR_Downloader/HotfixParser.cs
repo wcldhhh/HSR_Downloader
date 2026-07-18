@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Text;
 using Newtonsoft.Json;
 
@@ -10,6 +10,7 @@ public class HotfixParser
     private readonly Logger _logger;
     private readonly HotfixJson _hotfixJson;
     private readonly string _platform;
+    private readonly ServerMode _mode;
     private BlockV _blockV;
     private LuaIndex _luaIndex;
     private DesignIndex _designIndex;
@@ -32,12 +33,13 @@ public class HotfixParser
     /// <summary>Get the parsed LuaIndex (available after ParseLuaDatasAsync).</summary>
     public LuaIndex? GetLuaIndex() => _luaIndex;
 
-    public HotfixParser(HttpClient client, Logger logger, HotfixJson hotfixJson, string platform, BlockV blockV, DesignIndex designIndex, LuaIndex luaIndex)
+    public HotfixParser(HttpClient client, Logger logger, HotfixJson hotfixJson, string platform, ServerMode mode, BlockV blockV, DesignIndex designIndex, LuaIndex luaIndex)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _hotfixJson = hotfixJson ?? throw new ArgumentNullException(nameof(hotfixJson));
         _platform = platform ?? throw new ArgumentNullException(nameof(platform));
+        _mode = mode;
         _blockV = blockV ?? throw new ArgumentNullException(nameof(blockV));
         _luaIndex = luaIndex ?? throw new ArgumentNullException(nameof(luaIndex));
         _designIndex = designIndex ?? throw new ArgumentNullException(nameof(designIndex));
@@ -124,23 +126,36 @@ public class HotfixParser
 
             _logger.LogInfo("Successfully fetched M_DesignV data from the URL");
 
-            using var ms = new MemoryStream(designBytes);
-            using var br = new EndianBinaryReader(ms, Encoding.UTF8);
-            var magic = new string(br.ReadChars(4));
+            string indexHash;
 
-            br.ReadInt16();
-            var MetadataInfoSize = br.ReadInt32();
-            ms.Seek(0xE, SeekOrigin.Current);
+            if (_mode == ServerMode.Beta)
+            {
+                // Beta format: structured header with magic, version fields, etc.
+                using var ms = new MemoryStream(designBytes);
+                using var br = new EndianBinaryReader(ms, Encoding.UTF8);
+                var magic = new string(br.ReadChars(4));
+                br.ReadInt16();
+                var MetadataInfoSize = br.ReadInt32();
+                ms.Seek(0xE, SeekOrigin.Current);
+                var RemoteRevisionID = br.ReadInt32();
+                indexHash = br.ReadHash();
+                var AssetListFilesize = br.ReadUInt32();
+                br.ReadUInt32();
+                var AssetListUnixTimestamp = br.ReadUInt64();
+                var AssetListRootPath = br.ReadString();
+            }
+            else
+            {
+                // Rel format: skip 6 uint32s (24 bytes), then RevisionID (uint32 LE), then ByteHash16
+                using var ms = new MemoryStream(designBytes);
+                using var br = new EndianBinaryReader(ms, Encoding.UTF8);
+                ms.Seek(6 * 4, SeekOrigin.Begin);
+                var RemoteRevisionID = br.ReadUInt32();
+                indexHash = br.ReadHash();
+                _logger.LogInfo($"DesignV RevisionID: {RemoteRevisionID}, IndexHash: {indexHash}");
+            }
 
-            var RemoteRevisionID = br.ReadInt32();
-            var IndexHash = br.ReadHash();
-
-            var AssetListFilesize = br.ReadUInt32();
-            br.ReadUInt32();
-            var AssetListUnixTimestamp = br.ReadUInt64();
-            var AssetListRootPath = br.ReadString();
-
-            string indexHashUrl = $"{_hotfixJson.exResourceUrl}/client/{_platform}/DesignV_{IndexHash}.bytes";
+            string indexHashUrl = $"{_hotfixJson.exResourceUrl}/client/{_platform}/DesignV_{indexHash}.bytes";
             byte[] indexBytes = await _client.GetByteArrayAsync(indexHashUrl).ConfigureAwait(false);
             _designIndex = DesignIndex.Read(indexBytes);
             designItems.Add(new DownloadItem(indexHashUrl, "DesignData"));
@@ -148,7 +163,11 @@ public class HotfixParser
             var entriesNum = _designIndex.Files.Sum(file => file.Entries.Count);
             var filesNum = _designIndex.Files.Count;
             var availableLangs = _designIndex.Files.Where(f => !string.IsNullOrEmpty(f.Lang)).Select(f => f.Lang).Distinct().OrderBy(l => l).ToList();
-            _logger.LogInfo($"DesignV v{_designIndex.Version}: {filesNum} files, {entriesNum} entries, languages: [{string.Join(", ", availableLangs)}]", true);
+
+            if (_mode == ServerMode.Beta && _designIndex.Version > 0)
+                _logger.LogInfo($"DesignV v{_designIndex.Version}: {filesNum} files, {entriesNum} entries, languages: [{string.Join(", ", availableLangs)}]", true);
+            else
+                _logger.LogInfo($"DesignIndex: {filesNum} files, {entriesNum} entries, DesignDataCount: {_designIndex.DesignDataCount}", true);
 
             foreach (var file in _designIndex.Files)
             {
@@ -158,7 +177,6 @@ public class HotfixParser
                     continue;
                 }
 
-                // Put language-specific files in language subdirectory (both URL and local path)
                 var langPath = string.IsNullOrEmpty(file.Lang) ? "" : $"/{file.Lang}";
                 var subDir = string.IsNullOrEmpty(file.Lang) ? "DesignData" : $"DesignData/{file.Lang}";
                 designItems.Add(new DownloadItem(
@@ -212,7 +230,11 @@ public class HotfixParser
             var entriesNum = _luaIndex.Files.Sum(file => file.Entries.Count);
             var filesNum = _luaIndex.Files.Count;
             var availableLangs = _luaIndex.Files.Where(f => !string.IsNullOrEmpty(f.Lang)).Select(f => f.Lang).Distinct().OrderBy(l => l).ToList();
-            _logger.LogInfo($"LuaV v{_luaIndex.Version}: {filesNum} files, {entriesNum} entries, languages: [{string.Join(", ", availableLangs)}]", true);
+
+            if (_mode == ServerMode.Beta && _luaIndex.Version > 0)
+                _logger.LogInfo($"LuaV v{_luaIndex.Version}: {filesNum} files, {entriesNum} entries, languages: [{string.Join(", ", availableLangs)}]", true);
+            else
+                _logger.LogInfo($"LuaIndex: {filesNum} files, {entriesNum} entries", true);
 
             foreach (var file in _luaIndex.Files)
             {
@@ -238,22 +260,5 @@ public class HotfixParser
         {
             _logger.LogError($"Unexpected error: {e.Message}");
         }
-    }
-}
-
-/// <summary>
-/// Represents a downloadable item with URL, destination subdirectory, and filename.
-/// </summary>
-public class DownloadItem
-{
-    public string Url { get; }
-    public string SubDirectory { get; }
-    public string FileName { get; }
-
-    public DownloadItem(string url, string subDirectory, string? fileName = null)
-    {
-        Url = url;
-        SubDirectory = subDirectory;
-        FileName = fileName ?? new Uri(url).Segments.Last();
     }
 }

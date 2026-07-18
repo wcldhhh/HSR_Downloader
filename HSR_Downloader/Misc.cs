@@ -1,7 +1,25 @@
-﻿using System;
+using System;
 using System.Text.Json.Serialization;
 
 namespace HSR_DataDownloader;
+
+/// <summary>
+/// Server mode: Beta uses DesignV/LuaV v3/v4 format, Rel uses legacy format.
+/// </summary>
+public enum ServerMode
+{
+    Beta,
+    Rel
+}
+
+/// <summary>
+/// Default language lists for each server mode.
+/// </summary>
+public static class DefaultLanguages
+{
+    public static readonly List<string> Beta = new() { "cn", "en", "jp", "kr" };
+    public static readonly List<string> Rel = new() { "cn", "en", "jp", "kr", "cht" };
+}
 
 public class HotfixJson
 {
@@ -29,7 +47,6 @@ public class BlockV
     public int length;
     public List<AsbBlock> asbBlocks = new();
 
-    // Add here a function to read the data from byte[] using EndianBinaryReader
     public void ReadData(byte[] data)
     {
         using (var reader = new EndianBinaryReader(new MemoryStream(data)))
@@ -58,6 +75,23 @@ public class AsbBlock
     public int size;
     public bool isStart;
     public byte[] temp = new byte[4];
+}
+
+/// <summary>
+/// Represents a downloadable item with URL, destination subdirectory, and filename.
+/// </summary>
+public class DownloadItem
+{
+    public string Url { get; }
+    public string SubDirectory { get; }
+    public string FileName { get; }
+
+    public DownloadItem(string url, string subDirectory, string? fileName = null)
+    {
+        Url = url;
+        SubDirectory = subDirectory;
+        FileName = fileName ?? new Uri(url).Segments.Last();
+    }
 }
 
 public class M_DesignV
